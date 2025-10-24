@@ -138,10 +138,11 @@ class ClickParam(BaseModel):
     button_id: str
 
 
-@app.post("/click_button")
-def click_button(params: ClickParam):
+@app.post("/click_link_and_page_items")
+def click_link_and_page_items(params: ClickParam):
     """
-    点击页面上的指定按钮
+    点击指定按钮（如搜索），并返回新页面上所有 h3 标签信息
+    返回格式：{"page_items": [{"text": "...", "href": "..."}, ...]}
     """
     global page
     if not page:
@@ -151,9 +152,117 @@ def click_button(params: ClickParam):
         index = int(params.button_id.split("_")[-1]) - 1
         el = buttons.nth(index)
         name = el.inner_text().strip() or el.get_attribute("value")
+        # 滚动确保可点击
+        try:
+            el.scroll_into_view_if_needed()
+        except Exception:
+            pass
+
+        # 点击一次
         el.click()
-        time.sleep(2)
-        return {"status": f"点击成功: {name}"}
+
+        # 若点击产生新标签页，则切换到新页面
+        new_pg = None
+        try:
+            new_pg = context.wait_for_event("page", timeout=5000)
+        except Exception:
+            new_pg = None
+        if new_pg is not None:
+            try:
+                new_pg.wait_for_load_state("domcontentloaded", timeout=10000)
+            except Exception:
+                pass
+            # 切换当前全局 page 到新页面
+            page = new_pg
+        else:
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+
+        # 最多等待一会儿，直到出现 h3
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                if page.locator("h3").count() > 0:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+        # 收集所有 frame 中的 h3 标签信息
+        def collect_h3(from_page):
+            items_acc = []
+            # 顶层
+            try:
+                for elh in from_page.query_selector_all("h3"):
+                    try:
+                        text_val = (elh.inner_text() or "").strip()
+                    except Exception:
+                        text_val = ""
+                    href_val = ""
+                    try:
+                        a_el = elh.query_selector("a")
+                        if a_el:
+                            href_val = a_el.get_attribute("href") or ""
+                    except Exception:
+                        pass
+                    items_acc.append({"text": text_val, "href": href_val})
+            except Exception:
+                pass
+            # 子 frame
+            try:
+                for fr in from_page.frames:
+                    try:
+                        for elh in fr.query_selector_all("h3"):
+                            try:
+                                text_val = (elh.inner_text() or "").strip()
+                            except Exception:
+                                text_val = ""
+                            href_val = ""
+                            try:
+                                a_el = elh.query_selector("a")
+                                if a_el:
+                                    href_val = a_el.get_attribute("href") or ""
+                            except Exception:
+                                pass
+                            items_acc.append({"text": text_val, "href": href_val})
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return items_acc
+
+        # 基于页面与子 frame 收集所有 h3 文本，转为 id/name 形式
+        def collect_h3_names(from_page):
+            items_acc = []
+            try:
+                for elh in from_page.query_selector_all("h3"):
+                    try:
+                        text_val = (elh.inner_text() or "").strip()
+                    except Exception:
+                        text_val = ""
+                    items_acc.append(text_val)
+            except Exception:
+                pass
+            try:
+                for fr in from_page.frames:
+                    try:
+                        for elh in fr.query_selector_all("h3"):
+                            try:
+                                text_val = (elh.inner_text() or "").strip()
+                            except Exception:
+                                text_val = ""
+                            items_acc.append(text_val)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return items_acc
+
+        names = collect_h3_names(page)
+        h3_items = [{"id": f"h3_{i+1}", "name": n} for i, n in enumerate(names)]
+        return {"page_items": {"h3": h3_items}}
     except Exception as e:
         return {"error": str(e)}
 
@@ -180,6 +289,7 @@ def set_input_value(params: InputParam):
         el = inputs.nth(index)
         el.fill(params.value)
         return {"status": "200", "info": "设置按钮值成功"}
+        return {"status": "200", "info": "设置按钮值成功"}
         return {"status": f"已设置 {params.input_id} 的值为 {params.value}"}
     except Exception as e:
         return {"error": str(e)}
@@ -189,7 +299,7 @@ def set_input_value(params: InputParam):
 # 点击标题接口（新增）
 # --------------------------------------------------------
 class TitleParam(BaseModel):
-    keyword: str
+    id: str
 
 
 @app.post("/click_title_by_keyword")
@@ -200,6 +310,45 @@ def click_title_by_keyword(params: TitleParam):
     global page
     if not page:
         return {"error": "页面未打开"}
+    # 基于 id（如 h3_2）点击对应 h3，保持与上个接口相同的顺序规则
+    try:
+        # 解析 id
+        try:
+            idx = int(str(params.id).split("_")[-1]) - 1
+        except Exception:
+            return {"error": "id 格式错误，应形如 h3_1"}
+        if idx < 0:
+            return {"error": "id 序号无效"}
+
+        # 收集元素：先顶层 h3，再各子 frame 的 h3（与 click_link_and_page_items 中顺序一致）
+        elements = []
+        try:
+            elements.extend(page.query_selector_all("h3"))
+        except Exception:
+            pass
+        try:
+            for fr in page.frames:
+                try:
+                    elements.extend(fr.query_selector_all("h3"))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        if idx >= len(elements):
+            return {"error": "未找到对应的 h3"}
+
+        target = elements[idx]
+        try:
+            target.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        target.click()
+        time.sleep(1)
+        return {"status": "ok", "clicked": params.id}
+    except Exception as e:
+        return {"error": str(e)}
+    # 下面为兼容旧实现的遗留代码（按关键字），已不会被执行
     try:
         elements = page.locator("h3.textOF1")
         found = False
