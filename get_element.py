@@ -1,7 +1,7 @@
 import requests
 import time
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://127.0.0.1:8000"
 
 # 1. 获取页面元素
 r = requests.post(f"{BASE_URL}/get_url_items", json={"url": "http://192.168.0.221:1680/dataMenuF"})

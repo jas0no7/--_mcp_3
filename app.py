@@ -138,8 +138,8 @@ class ClickParam(BaseModel):
     button_id: str
 
 
-@app.post("/click_link_and_page_items")
-def click_link_and_page_items(params: ClickParam):
+@app.post("/click_button_and_page_items")
+def click_button_and_page_items(params: ClickParam):
     """
     点击指定按钮（如搜索），并返回新页面上所有 h3 标签信息
     返回格式：{"page_items": [{"text": "...", "href": "..."}, ...]}
@@ -262,7 +262,7 @@ def click_link_and_page_items(params: ClickParam):
 
         names = collect_h3_names(page)
         h3_items = [{"id": f"h3_{i+1}", "name": n} for i, n in enumerate(names)]
-        return {"page_items": {"h3": h3_items}}
+        return {"page_items": {"links": h3_items}}
     except Exception as e:
         return {"error": str(e)}
 
@@ -302,7 +302,7 @@ class TitleParam(BaseModel):
     id: str
 
 
-@app.post("/click_title_by_keyword")
+@app.post("/click_link_and_page_items")
 def click_title_by_keyword(params: TitleParam):
     """
     点击页面上包含指定关键字的标题（h3.textOF1）
@@ -345,7 +345,25 @@ def click_title_by_keyword(params: TitleParam):
             pass
         target.click()
         time.sleep(1)
-        return {"status": "ok", "clicked": params.id}
+
+        # 点击后提取表格数据
+        page.wait_for_selector("table")
+        page.wait_for_selector("table")
+        headers = [th.inner_text().strip() for th in page.query_selector_all("table thead tr th")]
+        rows = page.query_selector_all("table tbody tr")
+        data = []
+        for row in rows:
+            cells = [td.inner_text().strip() for td in row.query_selector_all("td")]
+            if headers and len(cells) == len(headers):
+                data.append(dict(zip(headers, cells)))
+            elif cells:
+                data.append({f"col_{i+1}": v for i, v in enumerate(cells)})
+
+        result = {"rows": len(data), "data": data}
+        # 成功提取后自动关闭浏览器，清理会话
+        stop_browser()
+        stop_browser()
+        return result
     except Exception as e:
         return {"error": str(e)}
     # 下面为兼容旧实现的遗留代码（按关键字），已不会被执行
@@ -371,8 +389,9 @@ def click_title_by_keyword(params: TitleParam):
 # --------------------------------------------------------
 # 提取表格接口（新增）
 # --------------------------------------------------------
-@app.post("/extract_table")
-def extract_table():
+# 已合并：原接口 /extract_table 已并入 /click_link_and_page_items
+# (deprecated) @app.post("/extract_table")
+def extract_table_deprecated():
     """
     提取当前页面的表格数据并返回 JSON
     """
