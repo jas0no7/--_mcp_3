@@ -1,0 +1,5 @@
+fastapi>=0.110,<1.0
+pydantic>=2.4,<3.0
+uvicorn[standard]>=0.23,<1.0
+playwright>=1.44,<2.0
+anyio>=3.7,<4.0
