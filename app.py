@@ -1,60 +1,57 @@
+# -*- coding: utf-8 -*-
 from fastapi import FastAPI, Body
 from pydantic import BaseModel
 from playwright.sync_api import sync_playwright
-import asyncio, os, json, time
+import asyncio, time, io, sys
 import anyio
+import ddddocr
 anyio.lowlevel.RUN_SYNC_IN_WORKER_THREAD = False
 # ------------------ Windows 异步兼容 ------------------
 asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 app = FastAPI(title="Playwright Page Interaction")
 
-STATE_PATH = "storageState.json"
 p, browser, context, page = None, None, None, None
 
 
 # --------------------------------------------------------
 # 初始化浏览器
 # --------------------------------------------------------
-def _is_login_required(cur_page):
-    try:
-        current_url = (cur_page.url or "").lower()
-    except Exception:
-        current_url = ""
-    if any(key in current_url for key in ["login", "signin", "auth"]):
-        return True
-    try:
-        if cur_page.locator("input[type='password']").count() > 0:
-            return True
-        if cur_page.locator("img[src*='captcha' i], img[alt*='captcha' i], input[name*='captcha' i], input[id*='captcha' i]").count() > 0:
-            return True
-    except Exception:
-        pass
-    return False
+LOGIN_URL = "http://192.168.0.221:1680/dataMenuF"
 
+def _perform_login_with_ocr(cur_page):
+    """
+    打开登录页，识别验证码并登录，然后点击“数据目录”。
+    依据用户提供脚本，仅需识别验证码并提交。
+    """
+    # 打开登录页
+    cur_page.goto(LOGIN_URL)
 
-def _ensure_login_and_refresh_state(target_url: str, wait_seconds: int = 180):
-    global context, page
+    # 等待验证码加载并截图为内存字节
+    xpath_img = '//*[@id="app"]/div/div[1]/form/div[3]/div/div[2]/img'
+    cur_page.wait_for_selector(f"xpath={xpath_img}", timeout=10000)
+    img_element = cur_page.locator(f"xpath={xpath_img}")
+    img_bytes = img_element.screenshot()
+
+    # 初始化 ddddocr，屏蔽其广告输出
+    _stdout = sys.stdout
+    sys.stdout = io.StringIO()
     try:
-        if _is_login_required(page):
-            deadline = time.time() + max(1, wait_seconds)
-            while time.time() < deadline:
-                if not _is_login_required(page):
-                    break
-                time.sleep(1)
-            if not _is_login_required(page):
-                try:
-                    context.storage_state(path=STATE_PATH)
-                except Exception:
-                    pass
-                try:
-                    if page.url != target_url:
-                        page.goto(target_url, wait_until="networkidle")
-                except Exception:
-                    pass
-    except Exception:
-        # 保守处理，任何异常都不阻断原有浏览流程
-        pass
+        ocr = ddddocr.DdddOcr()
+    finally:
+        sys.stdout = _stdout
+
+    # 识别验证码
+    res = ocr.classification(img_bytes)
+
+    # 填入验证码并提交登录
+    cur_page.fill('input[placeholder="验证码："]', res)
+    cur_page.click('xpath=//*[@id="app"]/div/div[1]/form/div[4]/div/button/span/span')
+
+    # 等待进入首页并点击“数据目录”
+    cur_page.wait_for_selector("text=数据目录", timeout=15000)
+    cur_page.click("text=数据目录")
+    cur_page.wait_for_load_state("networkidle")
 
 
 def start_browser(url: str):
@@ -64,14 +61,19 @@ def start_browser(url: str):
             page.goto(url, wait_until="networkidle")
         except Exception:
             pass
-        _ensure_login_and_refresh_state(url)
         return page
     p = sync_playwright().start()
     browser = p.chromium.launch(headless=False)
-    context = browser.new_context(storage_state=STATE_PATH if os.path.exists(STATE_PATH) else None)
+    context = browser.new_context()
     page = context.new_page()
-    page.goto(url, wait_until="networkidle")
-    _ensure_login_and_refresh_state(url)
+    try:
+        _perform_login_with_ocr(page)
+    except Exception:
+        pass
+    try:
+        page.goto(url, wait_until="networkidle")
+    except Exception:
+        pass
     return page
 
 
@@ -141,8 +143,8 @@ class ClickParam(BaseModel):
 @app.post("/click_button_and_page_items")
 def click_button_and_page_items(params: ClickParam):
     """
-    点击指定按钮（如搜索），并返回新页面上所有 h3 标签信息
-    返回格式：{"page_items": [{"text": "...", "href": "..."}, ...]}
+    点击指定按钮（如搜索），并返回新页面上所有 h3 标签信息。
+    返回格式：{"page_items": [{"text": "...", "href": "..."}]}
     """
     global page
     if not page:
@@ -152,7 +154,8 @@ def click_button_and_page_items(params: ClickParam):
         index = int(params.button_id.split("_")[-1]) - 1
         el = buttons.nth(index)
         name = el.inner_text().strip() or el.get_attribute("value")
-        # 滚动确保可点击
+
+        # 滚动以确保可点击
         try:
             el.scroll_into_view_if_needed()
         except Exception:
@@ -161,7 +164,7 @@ def click_button_and_page_items(params: ClickParam):
         # 点击一次
         el.click()
 
-        # 若点击产生新标签页，则切换到新页面
+        # 若点击产生新标签页，则切换
         new_pg = None
         try:
             new_pg = context.wait_for_event("page", timeout=5000)
@@ -172,7 +175,6 @@ def click_button_and_page_items(params: ClickParam):
                 new_pg.wait_for_load_state("domcontentloaded", timeout=10000)
             except Exception:
                 pass
-            # 切换当前全局 page 到新页面
             page = new_pg
         else:
             try:
@@ -180,7 +182,7 @@ def click_button_and_page_items(params: ClickParam):
             except Exception:
                 pass
 
-        # 最多等待一会儿，直到出现 h3
+        # 等待页面加载 h3 元素
         deadline = time.time() + 5
         while time.time() < deadline:
             try:
@@ -190,77 +192,34 @@ def click_button_and_page_items(params: ClickParam):
                 pass
             time.sleep(0.3)
 
-        # 收集所有 frame 中的 h3 标签信息
+        # 收集所有 h3 标签信息
         def collect_h3(from_page):
             items_acc = []
-            # 顶层
             try:
                 for elh in from_page.query_selector_all("h3"):
-                    try:
-                        text_val = (elh.inner_text() or "").strip()
-                    except Exception:
-                        text_val = ""
+                    text_val = (elh.inner_text() or "").strip()
                     href_val = ""
-                    try:
-                        a_el = elh.query_selector("a")
-                        if a_el:
-                            href_val = a_el.get_attribute("href") or ""
-                    except Exception:
-                        pass
+                    a_el = elh.query_selector("a")
+                    if a_el:
+                        href_val = a_el.get_attribute("href") or ""
                     items_acc.append({"text": text_val, "href": href_val})
             except Exception:
                 pass
             # 子 frame
             try:
                 for fr in from_page.frames:
-                    try:
-                        for elh in fr.query_selector_all("h3"):
-                            try:
-                                text_val = (elh.inner_text() or "").strip()
-                            except Exception:
-                                text_val = ""
-                            href_val = ""
-                            try:
-                                a_el = elh.query_selector("a")
-                                if a_el:
-                                    href_val = a_el.get_attribute("href") or ""
-                            except Exception:
-                                pass
-                            items_acc.append({"text": text_val, "href": href_val})
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            return items_acc
-
-        # 基于页面与子 frame 收集所有 h3 文本，转为 id/name 形式
-        def collect_h3_names(from_page):
-            items_acc = []
-            try:
-                for elh in from_page.query_selector_all("h3"):
-                    try:
+                    for elh in fr.query_selector_all("h3"):
                         text_val = (elh.inner_text() or "").strip()
-                    except Exception:
-                        text_val = ""
-                    items_acc.append(text_val)
-            except Exception:
-                pass
-            try:
-                for fr in from_page.frames:
-                    try:
-                        for elh in fr.query_selector_all("h3"):
-                            try:
-                                text_val = (elh.inner_text() or "").strip()
-                            except Exception:
-                                text_val = ""
-                            items_acc.append(text_val)
-                    except Exception:
-                        pass
+                        href_val = ""
+                        a_el = elh.query_selector("a")
+                        if a_el:
+                            href_val = a_el.get_attribute("href") or ""
+                        items_acc.append({"text": text_val, "href": href_val})
             except Exception:
                 pass
             return items_acc
 
-        names = collect_h3_names(page)
+        names = [i["text"] for i in collect_h3(page)]
         h3_items = [{"id": f"h3_{i+1}", "name": n} for i, n in enumerate(names)]
         return {"page_items": {"links": h3_items}}
     except Exception as e:
@@ -288,15 +247,13 @@ def set_input_value(params: InputParam):
         index = int(params.input_id.split("_")[-1]) - 1
         el = inputs.nth(index)
         el.fill(params.value)
-        return {"status": "200", "info": "设置按钮值成功"}
-        return {"status": "200", "info": "设置按钮值成功"}
-        return {"status": f"已设置 {params.input_id} 的值为 {params.value}"}
+        return {"status": "200", "info": f"已设置 {params.input_id} 的值为 {params.value}"}
     except Exception as e:
         return {"error": str(e)}
 
 
 # --------------------------------------------------------
-# 点击标题接口（新增）
+# 点击标题接口（新版）
 # --------------------------------------------------------
 class TitleParam(BaseModel):
     link_id: str
@@ -305,49 +262,36 @@ class TitleParam(BaseModel):
 @app.post("/click_link_and_page_items")
 def click_title_by_keyword(params: TitleParam):
     """
-    点击页面上包含指定关键字的标题（h3.textOF1）
+    点击页面中指定 id（如 h3_1）的标题，并抓取表格数据
     """
     global page
     if not page:
         return {"error": "页面未打开"}
-    # 基于 id（如 h3_2）点击对应 h3，保持与上个接口相同的顺序规则
     try:
-        # 解析 id
-        try:
-            idx = int(str(params.link_id).split("_")[-1]) - 1
-        except Exception:
-            return {"error": "id 格式错误，应形如 h3_1"}
+        idx = int(str(params.link_id).split("_")[-1]) - 1
         if idx < 0:
             return {"error": "id 序号无效"}
 
-        # 收集元素：先顶层 h3，再各子 frame 的 h3（与 click_link_and_page_items 中顺序一致）
+        # 收集 h3 元素（包含子 frame）
         elements = []
-        try:
-            elements.extend(page.query_selector_all("h3"))
-        except Exception:
-            pass
-        try:
-            for fr in page.frames:
-                try:
-                    elements.extend(fr.query_selector_all("h3"))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        elements.extend(page.query_selector_all("h3"))
+        for fr in page.frames:
+            elements.extend(fr.query_selector_all("h3"))
 
         if idx >= len(elements):
             return {"error": "未找到对应的 h3"}
 
         target = elements[idx]
+        # 记录点击前的标题文本，作为表名
         try:
-            target.scroll_into_view_if_needed()
+            _table_name = (target.inner_text() or "").strip()
         except Exception:
-            pass
+            _table_name = ""
+        target.scroll_into_view_if_needed()
         target.click()
         time.sleep(1)
 
-        # 点击后提取表格数据
-        page.wait_for_selector("table")
+        # 抓取表格
         page.wait_for_selector("table")
         headers = [th.inner_text().strip() for th in page.query_selector_all("table thead tr th")]
         rows = page.query_selector_all("table tbody tr")
@@ -359,20 +303,19 @@ def click_title_by_keyword(params: TitleParam):
             elif cells:
                 data.append({f"col_{i+1}": v for i, v in enumerate(cells)})
 
-        # 按要求返回表格结构
         result = {
             "table": [
                 {
-                    "table_name": "",
+                    "table_name": _table_name,
                     "page_size": len(data),
                     "page_count": "",
                     "buttons": [{"id": "p1216", "name": "前往"}],
-                    "data ": data
+                    "data": data
                 }
             ]
         }
 
-        # page_count 通过指定 XPath 获取
+        # 获取分页信息
         try:
             pc_el = page.locator('xpath=//*[@id="app"]/div/section/div/div/div[1]/div/div[3]/div[2]/div[2]/div[2]/div/span[1]')
             if pc_el.count() > 0:
@@ -381,7 +324,7 @@ def click_title_by_keyword(params: TitleParam):
         except Exception:
             pass
 
-        # buttons[0].id 通过指定 XPath 获取，name 固定为 “前往”
+        # 获取分页按钮 id
         try:
             btn_el = page.locator('xpath=//*[@id="app"]/div/section/div/div/div[1]/div/div[3]/div[2]/div[2]/div[2]/div/span[3]/span[1]')
             if btn_el.count() > 0:
@@ -390,45 +333,22 @@ def click_title_by_keyword(params: TitleParam):
         except Exception:
             pass
 
-        # 成功提取后自动关闭浏览器，清理会话
-        stop_browser()
         stop_browser()
         return result
     except Exception as e:
         return {"error": str(e)}
-    # 下面为兼容旧实现的遗留代码（按关键字），已不会被执行
-    try:
-        elements = page.locator("h3.textOF1")
-        found = False
-        for i in range(elements.count()):
-            el = elements.nth(i)
-            text = el.inner_text().strip()
-            if params.keyword in text:
-                el.scroll_into_view_if_needed()
-                el.click()
-                found = True
-                break
-        if not found:
-            return {"error": f"未找到包含 {params.keyword} 的标题"}
-        time.sleep(3)
-        return {"status": f"已点击标题: {params.keyword}"}
-    except Exception as e:
-        return {"error": str(e)}
 
 
 # --------------------------------------------------------
-# 提取表格接口（新增）
+# 抽取表格接口（旧版）
 # --------------------------------------------------------
-# 已合并：原接口 /extract_table 已并入 /click_link_and_page_items
-# (deprecated) @app.post("/extract_table")
 def extract_table_deprecated():
     """
-    提取当前页面的表格数据并返回 JSON
+    抽取当前页面的表格数据并返回 JSON
     """
     global page
     if not page:
         return {"error": "页面未打开"}
-
     try:
         page.wait_for_selector("table")
         headers = [th.inner_text().strip() for th in page.query_selector_all("table thead tr th")]
@@ -440,9 +360,7 @@ def extract_table_deprecated():
                 data.append(dict(zip(headers, cells)))
             elif cells:
                 data.append({f"col_{i+1}": v for i, v in enumerate(cells)})
-
         result = {"rows": len(data), "data": data}
-        # 成功提取后自动关闭浏览器，清理会话
         stop_browser()
         return result
     except Exception as e:
