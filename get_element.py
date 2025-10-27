@@ -26,3 +26,19 @@ time.sleep(1)
 r = requests.post(f"{BASE_URL}/extract_table")
 data = r.json()
 print(data)
+
+result = {"table": [
+    {
+        "table_name": "",
+        "page_size": "",  # len(data)
+        "page_count": "",  # 其中 xpath 为：//*[@id="app"]/div/section/div/div/div[1]/div/div[3]/div[2]/div[2]/div[2]/div/span[1]
+        "buttons": [{
+            "id": "p1216",  # 其中  //*[@id="app"]/div/section/div/div/div[1]/div/div[3]/div[2]/div[2]/div[2]/div/span[3]/span[1]
+            "name": "前往"
+        }],
+        "data ": [{
+            data
+        }]
+
+    }
+]}

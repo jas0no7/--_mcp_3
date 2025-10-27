@@ -299,7 +299,7 @@ def set_input_value(params: InputParam):
 # 点击标题接口（新增）
 # --------------------------------------------------------
 class TitleParam(BaseModel):
-    id: str
+    link_id: str
 
 
 @app.post("/click_link_and_page_items")
@@ -314,7 +314,7 @@ def click_title_by_keyword(params: TitleParam):
     try:
         # 解析 id
         try:
-            idx = int(str(params.id).split("_")[-1]) - 1
+            idx = int(str(params.link_id).split("_")[-1]) - 1
         except Exception:
             return {"error": "id 格式错误，应形如 h3_1"}
         if idx < 0:
@@ -359,7 +359,37 @@ def click_title_by_keyword(params: TitleParam):
             elif cells:
                 data.append({f"col_{i+1}": v for i, v in enumerate(cells)})
 
-        result = {"rows": len(data), "data": data}
+        # 按要求返回表格结构
+        result = {
+            "table": [
+                {
+                    "table_name": "",
+                    "page_size": len(data),
+                    "page_count": "",
+                    "buttons": [{"id": "p1216", "name": "前往"}],
+                    "data ": data
+                }
+            ]
+        }
+
+        # page_count 通过指定 XPath 获取
+        try:
+            pc_el = page.locator('xpath=//*[@id="app"]/div/section/div/div/div[1]/div/div[3]/div[2]/div[2]/div[2]/div/span[1]')
+            if pc_el.count() > 0:
+                page_count_text = (pc_el.nth(0).inner_text() or "").strip()
+                result["table"][0]["page_count"] = page_count_text
+        except Exception:
+            pass
+
+        # buttons[0].id 通过指定 XPath 获取，name 固定为 “前往”
+        try:
+            btn_el = page.locator('xpath=//*[@id="app"]/div/section/div/div/div[1]/div/div[3]/div[2]/div[2]/div[2]/div/span[3]/span[1]')
+            if btn_el.count() > 0:
+                btn_id = btn_el.nth(0).get_attribute("id") or "p1216"
+                result["table"][0]["buttons"] = [{"id": btn_id, "name": "前往"}]
+        except Exception:
+            pass
+
         # 成功提取后自动关闭浏览器，清理会话
         stop_browser()
         stop_browser()
