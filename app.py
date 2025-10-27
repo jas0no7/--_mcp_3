@@ -282,11 +282,6 @@ def click_title_by_keyword(params: TitleParam):
             return {"error": "未找到对应的 h3"}
 
         target = elements[idx]
-        # 记录点击前的标题文本，作为表名
-        try:
-            _table_name = (target.inner_text() or "").strip()
-        except Exception:
-            _table_name = ""
         target.scroll_into_view_if_needed()
         target.click()
         time.sleep(1)
@@ -306,7 +301,7 @@ def click_title_by_keyword(params: TitleParam):
         result = {
             "table": [
                 {
-                    "table_name": _table_name,
+                    "table_name": "",
                     "page_size": len(data),
                     "page_count": "",
                     "buttons": [{"id": "p1216", "name": "前往"}],
