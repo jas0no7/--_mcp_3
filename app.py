@@ -298,13 +298,23 @@ def click_title_by_keyword(params: TitleParam):
             elif cells:
                 data.append({f"col_{i+1}": v for i, v in enumerate(cells)})
 
+        # 解析表名：优先使用被点击的 h3 文本，其次尝试 table caption
+        table_name = (target.inner_text() or "").strip()
+        try:
+            if not table_name:
+                cap = page.query_selector("table caption")
+                if cap:
+                    table_name = (cap.inner_text() or "").strip()
+        except Exception:
+            pass
+
         result = {
             "table": [
                 {
-                    "table_name": "",
+                    "table_name": table_name,
                     "page_size": len(data),
                     "page_count": "",
-                    "buttons": [{"id": "p1216", "name": "前往"}],
+                    "buttons": [],
                     "data": data
                 }
             ]
@@ -319,12 +329,97 @@ def click_title_by_keyword(params: TitleParam):
         except Exception:
             pass
 
-        # 获取分页按钮 id
+        # 获取分页按钮（文本包含“前往”），仅限可点击的元素并去重
         try:
-            btn_el = page.locator('xpath=//*[@id="app"]/div/section/div/div/div[1]/div/div[3]/div[2]/div[2]/div[2]/div/span[3]/span[1]')
-            if btn_el.count() > 0:
-                btn_id = btn_el.nth(0).get_attribute("id") or "p1216"
-                result["table"][0]["buttons"] = [{"id": btn_id, "name": "前往"}]
+            def collect_goto_buttons(from_page):
+                items = []
+                selectors = [
+                    "button:has-text('前往')",
+                    "a:has-text('前往')",
+                    "input[type='button'][value*='前往']",
+                    "input[type='submit'][value*='前往']"
+                ]
+                for sel in selectors:
+                    loc = from_page.locator(sel)
+                    cnt = 0
+                    try:
+                        cnt = loc.count()
+                    except Exception:
+                        cnt = 0
+                    for i in range(cnt):
+                        el = loc.nth(i)
+                        bid = ""
+                        try:
+                            bid = el.get_attribute("id") or ""
+                        except Exception:
+                            bid = ""
+                        # 仅保留可见元素；如果没有 id，生成 XPath 选择器
+                        try:
+                            visible = el.is_visible()
+                        except Exception:
+                            visible = True
+                        if not visible:
+                            continue
+                        if bid:
+                            items.append({"id": bid, "name": "前往"})
+                        else:
+                            # 生成稳定的 XPath 作为回退
+                            xpath = ""
+                            try:
+                                xpath = el.evaluate(
+                                    """
+                                    el => {
+                                      function getXPath(e){
+                                        if(!e) return '';
+                                        let path='';
+                                        for (; e && e.nodeType===1; e=e.parentNode){
+                                          let idx=1, sib=e.previousElementSibling;
+                                          while(sib){ if(sib.nodeName===e.nodeName) idx++; sib=sib.previousElementSibling; }
+                                          path = '/' + e.nodeName.toLowerCase() + '[' + idx + ']' + path;
+                                        }
+                                        return path;
+                                      }
+                                      return getXPath(el);
+                                    }
+                                    """
+                                ) or ""
+                            except Exception:
+                                xpath = ""
+                            if xpath:
+                                items.append({"id": "", "name": "前往", "selector": xpath})
+                return items
+
+            buttons = []
+            # 主页面
+            buttons.extend(collect_goto_buttons(page))
+            # 子 frame
+            try:
+                for fr in page.frames:
+                    buttons.extend(collect_goto_buttons(fr))
+            except Exception:
+                pass
+
+            # 去重：优先按 id，其次按 selector
+            if buttons:
+                uniq = {}
+                for b in buttons:
+                    key = b.get("id") or b.get("selector")
+                    if key and key not in uniq:
+                        uniq[key] = b
+                result["table"][0]["buttons"] = list(uniq.values())
+            else:
+                # 兜底：保留旧的 XPath 方案尝试一次
+                try:
+                    btn_el = page.locator('xpath=//*[@id="app"]/div/section/div/div/div[1]/div/div[3]/div[2]/div[2]/div[2]/div/span[3]/span[1]')
+                    if btn_el.count() > 0:
+                        btn_id = btn_el.nth(0).get_attribute("id") or ""
+                        hardcoded_xpath = '//*[@id="app"]/div/section/div/div/div[1]/div/div[3]/div[2]/div[2]/div[2]/div/span[3]/span[1]'
+                        if btn_id:
+                            result["table"][0]["buttons"] = [{"id": btn_id, "name": "前往"}]
+                        else:
+                            result["table"][0]["buttons"] = [{"id": "", "name": "前往", "selector": hardcoded_xpath}]
+                except Exception:
+                    pass
         except Exception:
             pass
 
